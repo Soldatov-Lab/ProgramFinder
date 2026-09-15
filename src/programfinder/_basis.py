@@ -2,7 +2,7 @@
 
 The cached residual PCA is ``R ~= Z P`` with ``Z`` (n cells, r) scores and
 ``P`` (r, N features) component rows. Feature gICA rotates in a FEATURE-whitened
-basis (ported from ProgramForge ``multimodal_gica_core.py``):
+basis:
 
     x  = P - mean_features(P)                 (r, N) row-centred loadings
     K  = Lambda^{-1/2} U^T,  U Lambda U^T = x x^T / N     whitening (r, r)

@@ -60,5 +60,5 @@ def to_host(array, xp=None):
     return np.asarray(array)
 
 
-# Names kept for the vendored operator code, which calls ``_backend``.
+# Short alias used by the residual operator code.
 _backend = backend

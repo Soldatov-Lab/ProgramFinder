@@ -1,8 +1,6 @@
 """Matrix-free Pearson-residual operators backed by sparse count matrices.
 
-Vendored from ProgramForge ``implicit_residual.py`` (operators only; the
-fitters were left behind) together with the sparse moment null it needs. Two
-nulls are provided:
+Two nulls are provided:
 
 ``NBResidualOperator``
     feature-wise negative-binomial null, ``(X - s r) / sqrt(mu + phi mu^2)``,
@@ -28,7 +26,7 @@ __all__ = ["NBResidualOperator", "BernoulliResidualOperator"]
 
 
 # --------------------------------------------------------------------------
-# sparse method-of-moments NB null (from ProgramForge ``sparse_counts.py``)
+# sparse method-of-moments NB null
 # --------------------------------------------------------------------------
 
 def _split_mask(rows, columns, seed, validation_fraction, xp):
@@ -85,7 +83,7 @@ def _blocks(X, block_size):
 
 
 # --------------------------------------------------------------------------
-# operators (from ProgramForge ``implicit_residual.py``)
+# operators
 # --------------------------------------------------------------------------
 
 def _warn_wide_feature_ratio(shape, stacklevel=3):

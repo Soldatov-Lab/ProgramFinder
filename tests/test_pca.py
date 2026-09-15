@@ -1,4 +1,4 @@
-"""Explicit centring and the randomized PCA (from ProgramForge's option-0 probes)."""
+"""Explicit centring and the randomized PCA."""
 
 import numpy as np
 import pytest

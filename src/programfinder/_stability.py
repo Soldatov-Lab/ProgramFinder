@@ -1,9 +1,7 @@
 """Reliability of feature-ICA components: schedules, bootstraps, split halves.
 
 JADE has no random initialisation, so the optimiser-restart check used with
-tanh ICA is replaced by three data-side checks (ported from ProgramForge
-``atac_genomic_autocorr_preflight.py``, ``jade_rank_sweep_cell.py`` and the
-``atac_gica_identifiability_s*`` scripts):
+tanh ICA is replaced by three data-side checks:
 
 ``schedule_stability``
     re-diagonalise the SAME cumulant stack under permuted Jacobi pair

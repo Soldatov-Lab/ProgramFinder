@@ -15,14 +15,14 @@ Lower-level building blocks are importable from the private modules:
 read-out), ``_jade`` (JADE) and ``_stability``.
 """
 
-from . import get, io, pp, tl
+from . import get, io, pl, pp, tl
 from ._basis import CONTRASTS, feature_ica, whiten_loadings
 from ._pca import CentredOperator, randomized_pca
 from ._residual import BernoulliResidualOperator, NBResidualOperator
 from ._stability import alternating_blocks, effective_support
 
 __all__ = [
-    "pp", "tl", "io", "get",
+    "pp", "tl", "pl", "io", "get",
     "NBResidualOperator", "BernoulliResidualOperator",
     "CentredOperator", "randomized_pca",
     "whiten_loadings", "feature_ica", "CONTRASTS",

@@ -1,4 +1,4 @@
-"""Contracts of the vendored residual operators (from ProgramForge's library suite)."""
+"""Contracts of the residual operators."""
 
 import numpy as np
 import pytest

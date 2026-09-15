@@ -1,9 +1,8 @@
 # ProgramFinder
 
 Cell-program discovery by **residuals → PCA → feature-space ICA (gICA)**, with a
-scanpy-style API on AnnData. Extracted from the ProgramForge analysis code so
-the pipeline that was spread over unversioned benchmark scripts lives in one
-tested package.
+scanpy-style API on AnnData, plus chromosome-scale read-outs of the loadings
+for copy-number-like components.
 
 ```text
 counts (AnnData)
@@ -12,6 +11,13 @@ counts (AnnData)
   -> tl.gica               feature-whitened ICA of the leading PCs; contrast "jade" (Picard planned)
   -> tl.gica_stability     permuted Jacobi schedules, feature bootstraps, fixed-whitening split halves
   -> get.*                 labelled DataFrames of activities, loadings, reliability
+
+genomic read-outs of the loadings (pf.tl.genomic / pf.pl.genomic)
+  -> pp.feature_coordinates   var["pf_chrom"], var["pf_mid"] from peak names or var columns
+  -> tl.genomic_autocorr      six-lag genomic autocorrelation and the flatness screen
+  -> tl.chromosome_effects    standardised mean loading effect per chromosome or arm
+  -> tl.genome_profiles       winsorised block-mean binning + TV / group-TV fits, held-out lambda
+  -> pl.*                     the matching figures (multi-page genome profile PDF included)
 ```
 
 The residual matrix is never materialised: both null models expose
@@ -21,8 +27,8 @@ matrix runs on one GPU in device memory measured in hundreds of MB.
 ## Install
 
 ```bash
-python -m pip install -e '.[test,io]'        # CPU
-python -m pip install -e '.[test,io,gpu]'    # + cupy (CUDA 12)
+python -m pip install -e '.[test,io,plot]'        # CPU
+python -m pip install -e '.[test,io,plot,gpu]'    # + cupy (CUDA 12)
 pytest
 ```
 
@@ -47,6 +53,15 @@ pf.tl.gica_stability(adata, schedules=range(1, 6), bootstraps=10,
 pf.get.stability_table(adata)        # per component: kurtosis, support, worst |r|, split-half |cos|
 pf.get.activities(adata)             # cells x components
 pf.get.loadings(adata)               # features x components
+
+# chromosome-scale read-outs (ATAC peaks named chr:start-end, or var columns)
+pf.pp.feature_coordinates(adata)
+pf.tl.genomic_autocorr(adata)                       # uns["pf_gica"]["genomic_autocorr"]
+pf.tl.chromosome_effects(adata, level="arm")        # uns["pf_gica"]["arm_effects"]
+pf.tl.genome_profiles(adata)                        # uns["pf_gica"]["genome_profiles"]
+pf.pl.genomic_autocorr(adata, save="autocorr.png")
+pf.pl.chromosome_effects(adata, level="arm", save="arm_effects.png")
+pf.pl.genome_profiles(adata, pdf="genome_profiles.pdf", highlight=candidates)
 ```
 
 Where results land:
@@ -76,10 +91,21 @@ Where results land:
   from feature bootstraps, and from fixed-whitening split halves.
   `effective_support` catches components that are single-cell spikes.
 
-## Provenance
+- **Genomic read-outs are descriptive.** The autocorrelation ratio, the
+  standardised chromosome effect and the fitted segments are signed effects
+  with spans and approximate uncertainties. None of them is a test statistic
+  or DNA evidence: the batch-means SE misses correlation longer than the
+  block, and `n_peaks` is not a count of independent observations. The
+  centromere table is hg38 midpoints, so an arm boundary is an interval.
 
-`tl.gica(contrast="jade")` on the frozen ProgramForge ATAC rank-50 span
-(`opt0_pca_atac.npz`) reproduces the frozen basis (`basis_cache.npz`) with the
-identity permutation and minimum |cos| 1.0000 (98 sweeps, 40 s on an L40S).
-The residual operators and the centred randomized PCA carry their original
-tests; JADE, the basis read-out and the stability statistics gained theirs here.
+## Layout
+
+```
+programfinder/
+  pp.py            residual_null, residual_operator, feature_coordinates
+  tl/decomposition pca, gica, gica_stability
+  tl/genomic       genomic_autocorr, chromosome_effects, genome_profiles
+  pl/genomic       the matching figures
+  io.py, get.py
+  _residual, _pca, _basis, _jade, _stability, _cin, _genome   numeric cores
+```

@@ -1,6 +1,6 @@
 """Matrix-free, explicitly centred randomized PCA of a residual operator.
 
-Ported from ProgramForge ``benchmarks/pilot_option0_ica.py``. A range finder
+A range finder
 run against ``operator.matmat`` does not centre for free, and an uncentred
 sketch spends its first direction on the mean vector. With column means ``mu``
 and ``Zc = Z - 1 mu^T``,

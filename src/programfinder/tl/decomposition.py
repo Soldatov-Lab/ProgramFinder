@@ -1,4 +1,4 @@
-"""Tools: residual PCA, feature-space ICA and its reliability, on AnnData.
+"""Residual PCA, feature-space ICA and its reliability, on AnnData.
 
     pf.pp.residual_null(adata, model="bernoulli", depth_key="n_unique")
     pf.tl.pca(adata, n_comps=100)
@@ -16,10 +16,10 @@ import time
 
 import numpy as np
 
-from . import _pca, _stability
-from ._backend import _backend, resolve_device, to_host
-from ._basis import CONTRASTS, feature_ica
-from .pp import residual_operator
+from .. import _pca, _stability
+from .._backend import _backend, resolve_device, to_host
+from .._basis import CONTRASTS, feature_ica
+from ..pp import residual_operator
 
 __all__ = ["pca", "gica", "gica_stability"]
 

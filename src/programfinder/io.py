@@ -1,6 +1,5 @@
 """Streaming row selection from a large ``.h5ad`` without loading it.
 
-Ported and generalised from ProgramForge ``benchmarks/prepare_multiome_inputs.py``.
 A multiome object can be hundreds of thousands of cells by ~750k features in
 one CSR block; ``read_h5ad_rows`` reads ``obs`` first, evaluates a mask or a
 pandas query on it, then gathers only the selected rows straight from the

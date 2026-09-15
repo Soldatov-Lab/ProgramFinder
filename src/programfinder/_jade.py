@@ -1,9 +1,7 @@
 """JADE (Cardoso & Souloumiac 1993) for the feature-independent ICA arm.
 
-Vendored unchanged from ProgramForge ``benchmarks/jade_ica.py``.
-
-Written from the published algorithm, not ported from `jadeR.py` -- that port
-is GPL-3 and vendoring it would relicense this repository.
+Written from the published algorithm, not derived from `jadeR.py`, which is
+GPL-3 and would relicense this repository.
 
 Contract is identical to picard's
 `picard(..., ortho=True, whiten=True, centering=True)`: observations are

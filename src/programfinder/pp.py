@@ -22,7 +22,33 @@ from scipy import sparse
 from ._backend import resolve_device
 from ._residual import BernoulliResidualOperator, NBResidualOperator
 
-__all__ = ["residual_null", "residual_operator", "MODELS"]
+__all__ = ["residual_null", "residual_operator", "feature_coordinates", "MODELS"]
+
+
+def feature_coordinates(adata, *, chrom_key=None, start_key=None, end_key=None, copy=False):
+    """Record each feature's genomic coordinates in ``var``.
+
+    Reads existing ``var`` columns when the keys are given, otherwise parses
+    ``var_names`` of the form ``chr1:1000-1500``. Writes ``var["pf_chrom"]``,
+    ``var["pf_start"]``, ``var["pf_end"]`` and ``var["pf_mid"]`` (bp), which
+    every chromosome-scale tool reads.
+    """
+    from ._genome import parse_feature_names
+
+    adata = adata.copy() if copy else adata
+    if chrom_key is None and start_key is None and end_key is None:
+        chrom, start, end = parse_feature_names(adata.var_names)
+    else:
+        if None in (chrom_key, start_key, end_key):
+            raise ValueError("pass chrom_key, start_key and end_key together")
+        chrom = np.asarray(adata.var[chrom_key]).astype(str)
+        start = np.asarray(adata.var[start_key], np.int64)
+        end = np.asarray(adata.var[end_key], np.int64)
+    adata.var["pf_chrom"] = chrom
+    adata.var["pf_start"] = start
+    adata.var["pf_end"] = end
+    adata.var["pf_mid"] = (start + end) // 2
+    return adata if copy else None
 
 MODELS = ("nb", "bernoulli")
 
