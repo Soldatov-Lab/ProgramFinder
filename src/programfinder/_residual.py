@@ -361,7 +361,10 @@ class _ImplicitResidualOperator:
         xp, _ = _backend(self.device)
         if self.depth_bins is not None:
             out = xp.empty(self.shape[1], dtype=xp.float32)
-            weighted = self._weighted_counts_host
+            # The cached nonzeros are CSR (rows serve matmat); a CSR column
+            # slice scans every row, so one CSC copy turns the per-block cost
+            # from O(nnz) into O(block nnz). Local, so it is freed on return.
+            weighted = self._weighted_counts_host.tocsc()
             for start, stop in self._feature_blocks():
                 null = self._residual_null_block(start, stop, xp)
                 base = (xp.asarray(self.bin_counts)[:, None] * null**2).sum(axis=0)
