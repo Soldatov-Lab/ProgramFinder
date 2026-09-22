@@ -245,3 +245,29 @@ def test_nb_gpu_matches_cpu():
     right = rng.normal(size=(41, 3)).astype(np.float32)
     np.testing.assert_allclose(host.matmat(right), device.matmat(right).get(), rtol=1e-4, atol=1e-4)
     np.testing.assert_allclose(host.column_sumsq(), device.column_sumsq().get(), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("model", ["nb", "bernoulli"])
+def test_null_block_width_does_not_change_the_binned_products(model):
+    if model == "nb":
+        wide = _binned_nb()
+        narrow = _binned_nb()
+    else:
+        counts, depths = _counts_and_depths(seed=2)
+        wide, narrow = (BernoulliResidualOperator(counts, depths, block_size=6, depth_bins=8,
+                                                  device="cpu") for _ in range(2))
+    # one element per block: width falls back to block_size, so every null
+    # term spans several blocks, including a ragged last one
+    narrow.null_block_elements = 1
+    assert len(list(narrow._null_feature_blocks())) > 1
+    assert len(list(wide._null_feature_blocks())) == 1
+    rng = np.random.default_rng(3)
+    right = rng.normal(size=(wide.shape[1], 3))
+    left = rng.normal(size=(wide.shape[0], 2))
+    for product, argument in [("matmat", right), ("rmatmat", left),
+                              ("root_weighted_matmat", right),
+                              ("root_weighted_rmatmat", left)]:
+        np.testing.assert_allclose(getattr(narrow, product)(argument),
+                                   getattr(wide, product)(argument), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(narrow.column_sumsq(), wide.column_sumsq(),
+                               rtol=1e-5, atol=1e-5)

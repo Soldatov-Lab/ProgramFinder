@@ -280,6 +280,21 @@ class _ImplicitResidualOperator:
         for start in range(0, self.shape[1], self.block_size):
             yield start, min(start + self.block_size, self.shape[1])
 
+    #: elements (bins x features) of one block of a dense null term
+    null_block_elements = 1 << 22
+
+    def _null_feature_blocks(self):
+        """Feature spans for the dense null terms over depth bins.
+
+        ``block_size`` bounds a cells x features densification, which these
+        terms never make: their blocks are bins x features. Spans of
+        ``block_size`` features are launch-bound on a GPU, so they are sized
+        by ``null_block_elements`` instead.
+        """
+        width = max(self.block_size, self.null_block_elements // self.n_bins)
+        for start in range(0, self.shape[1], width):
+            yield start, min(start + width, self.shape[1])
+
     def root_weighted_rmatmat(self, left):
         """Return ``(sqrt(w) * Z).T @ left`` without constructing either matrix.
 
@@ -293,7 +308,7 @@ class _ImplicitResidualOperator:
             raise ValueError("left must have shape (n_cells, rank)")
         out = self._device_root_weighted_counts(xp).T @ left
         aggregate = self._bin_aggregate(left, xp)
-        for start, stop in self._feature_blocks():
+        for start, stop in self._null_feature_blocks():
             out[start:stop] -= self._root_weighted_null_block(start, stop, xp).T @ aggregate
         return out
 
@@ -306,7 +321,7 @@ class _ImplicitResidualOperator:
             raise ValueError("right must have shape (n_features, rank)")
         out = self._device_root_weighted_counts(xp) @ right
         null_by_bin = xp.zeros((self.n_bins, right.shape[1]), dtype=xp.float32)
-        for start, stop in self._feature_blocks():
+        for start, stop in self._null_feature_blocks():
             null_by_bin += self._root_weighted_null_block(start, stop, xp) @ right[start:stop]
         return out - null_by_bin[xp.asarray(self.bin_index)]
 
@@ -333,7 +348,7 @@ class _ImplicitResidualOperator:
         if self.depth_bins is not None:
             out = self._device_weighted_counts(xp) @ right
             null_by_bin = xp.zeros((self.n_bins, right.shape[1]), dtype=xp.float32)
-            for start, stop in self._feature_blocks():
+            for start, stop in self._null_feature_blocks():
                 null_by_bin += self._residual_null_block(start, stop, xp) @ right[start:stop]
             return out - null_by_bin[xp.asarray(self.bin_index)]
         out = xp.zeros((self.shape[0], right.shape[1]), dtype=xp.float32)
@@ -350,7 +365,7 @@ class _ImplicitResidualOperator:
         if self.depth_bins is not None:
             out = self._device_weighted_counts(xp).T @ left
             aggregate = self._bin_aggregate(left, xp)
-            for start, stop in self._feature_blocks():
+            for start, stop in self._null_feature_blocks():
                 out[start:stop] -= self._residual_null_block(start, stop, xp).T @ aggregate
             return out
         out = xp.empty((self.shape[1], left.shape[1]), dtype=xp.float32)
@@ -368,11 +383,7 @@ class _ImplicitResidualOperator:
             # pass over the cached CSR nonzeros, so no column is ever sliced.
             out = xp.empty(self.shape[1], dtype=xp.float64)
             bin_counts = xp.asarray(self.bin_counts)[:, None]
-            # The dense term touches no observations, so its blocks can be as
-            # wide as nnz_chunk allows; narrow ones are launch-bound on a GPU.
-            width = max(self.block_size, nnz_chunk // self.n_bins)
-            for start in range(0, self.shape[1], width):
-                stop = min(start + width, self.shape[1])
+            for start, stop in self._null_feature_blocks():
                 null = self._residual_null_block(start, stop, xp)
                 out[start:stop] = (bin_counts * null**2).sum(axis=0)
             weighted = self._device_weighted_counts(xp)
