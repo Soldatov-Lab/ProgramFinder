@@ -163,7 +163,7 @@ def _validate_bin_assignment(assignment, n_cells):
 class _ImplicitResidualOperator:
     """Matrix-free algebra shared by the feature-wise residual operators.
 
-    A subclass supplies a sparse observation matrix and five hooks; every
+    A subclass supplies a sparse observation matrix and six hooks; every
     product below is written once in terms of them:
 
     ``_residual_block``
@@ -171,6 +171,9 @@ class _ImplicitResidualOperator:
     ``_residual_null_block``
         the dense part of ``Z`` over depth bins -- that is, ``-Z`` at a zero
         observation;
+    ``_residual_null_at``
+        the same dense part, evaluated at given ``(bin, feature)`` pairs, so a
+        pass over the nonzeros never has to slice a feature block;
     ``weight_block``
         the Fisher weight ``w`` of the null, over depth bins;
     ``_root_weight_block``
@@ -218,6 +221,9 @@ class _ImplicitResidualOperator:
         raise NotImplementedError
 
     def _residual_null_block(self, start, stop, xp):
+        raise NotImplementedError
+
+    def _residual_null_at(self, bins, columns, xp):
         raise NotImplementedError
 
     def weight_block(self, start, stop, xp):
@@ -356,27 +362,46 @@ class _ImplicitResidualOperator:
             out[start:stop] = self._residual_block(start, stop, observations, xp).T @ left
         return out
 
-    def column_sumsq(self):
+    def column_sumsq(self, nnz_chunk=1 << 24):
         """Return ``sum_i Z_ij**2`` with one feature block of work memory."""
         xp, _ = _backend(self.device)
         if self.depth_bins is not None:
-            out = xp.empty(self.shape[1], dtype=xp.float32)
-            # The cached nonzeros are CSR (rows serve matmat); a CSR column
-            # slice scans every row, so one CSC copy turns the per-block cost
-            # from O(nnz) into O(block nnz). Local, so it is freed on return.
-            weighted = self._weighted_counts_host.tocsc()
-            for start, stop in self._feature_blocks():
+            # With v the observed nonzeros and n the null over depth bins,
+            # sum_i Z_ij^2 = sum_b n_b null_bj^2 + sum_nnz (v^2 - 2 v null).
+            # The dense term needs no observations; the sparse one is a single
+            # pass over the cached CSR nonzeros, so no column is ever sliced.
+            out = xp.empty(self.shape[1], dtype=xp.float64)
+            bin_counts = xp.asarray(self.bin_counts)[:, None]
+            # The dense term touches no observations, so its blocks can be as
+            # wide as nnz_chunk allows; narrow ones are launch-bound on a GPU.
+            width = max(self.block_size, nnz_chunk // self.n_bins)
+            for start in range(0, self.shape[1], width):
+                stop = min(start + width, self.shape[1])
                 null = self._residual_null_block(start, stop, xp)
-                base = (xp.asarray(self.bin_counts)[:, None] * null**2).sum(axis=0)
-                block = weighted[:, start:stop].tocoo()
-                if block.nnz:
-                    values = xp.asarray(block.data)
-                    groups = xp.asarray(self.bin_index[block.row])
-                    columns = xp.asarray(block.col)
-                    correction = values**2 - 2 * values * null[groups, columns]
-                    xp.add.at(base, columns, correction)
-                out[start:stop] = base
-            return out
+                out[start:stop] = (bin_counts * null**2).sum(axis=0)
+            weighted = self._device_weighted_counts(xp)
+            indptr = self._weighted_counts_host.indptr
+            groups = xp.asarray(self.bin_index)
+            # Row-aligned chunks of about nnz_chunk nonzeros each.
+            edges = np.unique(np.r_[np.searchsorted(
+                indptr, np.arange(0, weighted.nnz, nnz_chunk), side="right") - 1,
+                self.shape[0]])
+            for first_row, last_row in zip(edges[:-1], edges[1:]):
+                first, last = int(indptr[first_row]), int(indptr[last_row])
+                if xp is np:
+                    bins = np.repeat(self.bin_index[first_row:last_row],
+                                     np.diff(indptr[first_row:last_row + 1]))
+                else:
+                    # cupy.repeat takes no per-element counts
+                    rows = xp.searchsorted(weighted.indptr, xp.arange(first, last),
+                                           side="right") - 1
+                    bins = groups[rows]
+                columns = weighted.indices[first:last]
+                values = weighted.data[first:last]
+                null = self._residual_null_at(bins, columns, xp)
+                out += xp.bincount(columns, weights=values**2 - 2 * values * null,
+                                   minlength=self.shape[1])
+            return out.astype(xp.float32)
         out = xp.empty(self.shape[1], dtype=xp.float32)
         for start, stop, observations in self._blocks():
             residual = self._residual_block(start, stop, observations, xp)
@@ -496,6 +521,14 @@ class NBResidualOperator(_ImplicitResidualOperator):
         s = xp.asarray(self.bin_size_factors, dtype=xp.float32)[:, None]
         rate = xp.asarray(self.rate[start:stop], dtype=xp.float32)[None, :]
         phi = xp.asarray(self.dispersion[start:stop], dtype=xp.float32)[None, :]
+        mean = s * rate
+        return xp.sqrt(mean / xp.maximum(1 + phi * mean, 1e-8))
+
+    def _residual_null_at(self, bins, columns, xp):
+        """:meth:`_residual_null_block` at ``(bins[k], columns[k])`` pairs."""
+        s = xp.asarray(self.bin_size_factors, dtype=xp.float32)[bins]
+        rate = xp.asarray(self.rate, dtype=xp.float32)[columns]
+        phi = xp.asarray(self.dispersion, dtype=xp.float32)[columns]
         mean = s * rate
         return xp.sqrt(mean / xp.maximum(1 + phi * mean, 1e-8))
 
@@ -777,6 +810,14 @@ class BernoulliResidualOperator(_ImplicitResidualOperator):
         the NB null.
         """
         p = self._binned_p(start, stop, xp)
+        variance = p * (1 - p)
+        usable = variance > 0
+        null = xp.where(usable, xp.sqrt(p / xp.where(usable, 1 - p, 1)), 0)
+        return null.astype(xp.float32)
+
+    def _residual_null_at(self, bins, columns, xp):
+        """:meth:`_residual_null_block` at ``(bins[k], columns[k])`` pairs."""
+        p = self._device_bin_p(xp)[bins, columns]
         variance = p * (1 - p)
         usable = variance > 0
         null = xp.where(usable, xp.sqrt(p / xp.where(usable, 1 - p, 1)), 0)

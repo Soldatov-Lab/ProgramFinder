@@ -42,6 +42,9 @@ def test_nb_binned_products_match_the_binned_residual():
     np.testing.assert_allclose(operator.rmatmat(left), residual.T @ left, rtol=2e-5, atol=2e-5)
     np.testing.assert_allclose(operator.column_sumsq(), np.square(residual).sum(0),
                                rtol=2e-5, atol=2e-5)
+    # chunks far smaller than a row: every boundary case of the nonzero pass
+    np.testing.assert_allclose(operator.column_sumsq(nnz_chunk=5),
+                               np.square(residual).sum(0), rtol=2e-5, atol=2e-5)
 
 
 def test_nb_root_weighted_products_match_the_binned_residual():
@@ -133,6 +136,8 @@ def test_bernoulli_binned_products_match_the_binned_residual():
     np.testing.assert_allclose(operator.rmatmat(left), residual.T @ left, rtol=2e-5, atol=2e-5)
     np.testing.assert_allclose(operator.column_sumsq(), np.square(residual).sum(0),
                                rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(operator.column_sumsq(nnz_chunk=5),
+                               np.square(residual).sum(0), rtol=1e-4, atol=1e-4)
 
 
 def test_bernoulli_binned_probabilities_stay_calibrated():
