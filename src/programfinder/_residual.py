@@ -78,10 +78,6 @@ def _null_parameters(X, size_factors, *, seed=None, validation_fraction=0.0,
     return np.log(rate), phi
 
 
-def _blocks(X, block_size):
-    Xc = X.tocsc()
-
-
 # --------------------------------------------------------------------------
 # operators
 # --------------------------------------------------------------------------
