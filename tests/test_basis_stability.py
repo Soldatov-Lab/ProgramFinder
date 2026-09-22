@@ -57,8 +57,43 @@ def test_feature_ica_rejects_mismatched_inputs_and_unknown_contrasts():
         feature_ica(scores[:, :-1], P, use_gpu=False)
     with pytest.raises(ValueError, match="contrast"):
         feature_ica(scores, P, contrast="infomax", use_gpu=False)
-    with pytest.raises(NotImplementedError, match="PLAN.md"):
-        feature_ica(scores, P, contrast="picard", use_gpu=False)
+
+
+def test_picard_contrast_obeys_the_same_contract_and_finds_the_same_sources():
+    pytest.importorskip("picard")
+    scores, P, sources = _span()
+    fit = feature_ica(scores, P, contrast="picard", use_gpu=False)
+    Zc = scores - scores.mean(0)
+    np.testing.assert_allclose(Zc @ fit["score_to_activity"], fit["activities"], atol=1e-8)
+    np.testing.assert_allclose(fit["score_to_activity"] @ fit["loadings"], P, atol=1e-10)
+    np.testing.assert_allclose(fit["activities"].std(0), 1.0, atol=1e-8)
+    corr = np.abs(np.corrcoef(fit["sources"], sources)[: P.shape[0], P.shape[0]:])
+    assert corr.max(1).min() > 0.95
+    assert fit["diagnostics"]["contrast"] == "picard"
+    assert fit["diagnostics"]["device"] == "cpu"
+
+
+def test_the_two_contrasts_agree_where_the_sources_are_identified():
+    pytest.importorskip("picard")
+    scores, P, _ = _span()
+    jade = feature_ica(scores, P, contrast="jade", use_gpu=False)
+    pic = feature_ica(scores, P, contrast="picard", use_gpu=False)
+    _, _, corr = _stability.matched_columns(jade["activities"], pic["activities"])
+    assert corr.min() > 0.95
+    # One whitening for both contrasts, so their rotations compose orthogonally.
+    np.testing.assert_allclose(jade["K"], pic["K"], atol=1e-12)
+    product = jade["W"] @ pic["W"].T
+    np.testing.assert_allclose(product @ product.T, np.eye(P.shape[0]), atol=1e-8)
+
+
+def test_restart_stability_reports_the_criterion_of_every_restart():
+    pytest.importorskip("picard")
+    scores, P, _ = _span()
+    out = _stability.restart_stability(scores, P, seeds=(1, 2))
+    assert out["worst_abs_r"].shape == (P.shape[0],)
+    assert len(out["restarts"]) == 2
+    assert out["worst_abs_r"].min() > 0.95          # this span is identified
+    assert isinstance(out["best_criterion_is_base"], bool)
 
 
 def test_jade_rotation_reuses_a_supplied_stack_without_mutating_it():

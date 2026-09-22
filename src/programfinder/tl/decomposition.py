@@ -124,7 +124,7 @@ def _span(adata, use_key, n_comps):
 
 def gica(adata, n_comps=None, *, contrast="jade", use_key="pf_pca", key_added="pf_gica",
          device="auto", max_sweeps=600, threshold=None, schedule_seed=None, seed=0,
-         copy=False):
+         max_iter=1000, tol=1e-7, copy=False):
     """Feature-space ICA of the leading ``n_comps`` residual PCs.
 
     For an exact ordered decomposition the leading prefix of a rank-100 PCA is
@@ -147,7 +147,7 @@ def gica(adata, n_comps=None, *, contrast="jade", use_key="pf_pca", key_added="p
     scores, components = _span(adata, use_key, n_comps)
     fit = feature_ica(scores, components, contrast=contrast, use_gpu=(device == "gpu"),
                       max_sweeps=max_sweeps, threshold=threshold,
-                      schedule_seed=schedule_seed, seed=seed)
+                      schedule_seed=schedule_seed, seed=seed, max_iter=max_iter, tol=tol)
     adata.obsm[f"X_{key_added}"] = fit["activities"].astype(np.float32)
     adata.varm[f"{key_added}_loadings"] = np.ascontiguousarray(
         fit["loadings"].T.astype(np.float32))
@@ -164,7 +164,9 @@ def gica(adata, n_comps=None, *, contrast="jade", use_key="pf_pca", key_added="p
         "diagnostics": fit["diagnostics"],
         "params": {"n_comps": int(components.shape[0]), "use_key": use_key,
                    "max_sweeps": int(max_sweeps), "threshold": threshold,
-                   "schedule_seed": schedule_seed, "device": device},
+                   "schedule_seed": schedule_seed, "seed": int(seed),
+                   "max_iter": int(max_iter), "tol": float(tol),
+                   "device": "cpu" if contrast == "picard" else device},
     }
     return adata if copy else None
 
@@ -174,20 +176,26 @@ def gica_stability(adata, *, key="pf_gica", schedules=(1, 2, 3, 4, 5), bootstrap
                    min_support=100, stable_r=0.99, copy=False):
     """Reliability of the stored gICA components; results in ``uns[key]["stability"]``.
 
-    ``schedules`` re-diagonalises the same cumulants under permuted Jacobi
-    orderings; ``bootstraps`` refits on resampled features; ``split_mask``
-    (one boolean per feature, e.g. from ``alternating_blocks``) runs the
-    fixed-whitening split-half check. ``effective_support`` is always computed.
+    The optimiser-side check is chosen by the stored contrast: ``schedules``
+    re-diagonalises the same cumulants under permuted Jacobi orderings for
+    ``"jade"``, and is read as Picard restart seeds for ``"picard"``, which has
+    a random start instead. Either way the result lands under
+    ``stability["schedule"]`` or ``stability["restart"]`` and feeds the same
+    ``stable`` mask. ``bootstraps`` refits on resampled features and
+    ``split_mask`` (one boolean per feature, e.g. from ``alternating_blocks``)
+    runs the fixed-whitening split-half check; both are JADE-only for now
+    (see ``PLAN.md``). ``effective_support`` is always computed.
     Also written: ``adata.var`` is untouched; per-component arrays live in
     ``uns[key]["stability"]`` and a boolean ``stable`` mask combines the
-    schedule criterion (worst |r| > ``stable_r``) with ``min_support`` cells.
+    optimiser criterion (worst |r| > ``stable_r``) with ``min_support`` cells.
     """
     adata = adata.copy() if copy else adata
     if key not in adata.uns:
         raise KeyError(f"adata.uns[{key!r}] not found; run tl.gica first")
     spec = adata.uns[key]
-    if spec["contrast"] != "jade":
-        raise NotImplementedError("stability checks are defined for the jade contrast")
+    contrast = spec["contrast"]
+    if contrast not in CONTRASTS:
+        raise ValueError(f"unknown stored contrast {contrast!r}")
     device = resolve_device(device)
     use_gpu = device == "gpu"
     params = spec["params"]
@@ -196,13 +204,27 @@ def gica_stability(adata, *, key="pf_gica", schedules=(1, 2, 3, 4, 5), bootstrap
                   threshold=params["threshold"])
     activities = np.asarray(adata.obsm[f"X_{key}"], np.float64)
     out = {"effective_support": _stability.effective_support(activities),
-           "min_support": int(min_support), "stable_r": float(stable_r)}
+           "min_support": int(min_support), "stable_r": float(stable_r),
+           "contrast": contrast}
     stable = out["effective_support"] >= min_support
     if schedules:
-        sched = _stability.schedule_stability(scores, components, seeds=tuple(schedules),
-                                              **common)
-        out["schedule"] = sched
+        if contrast == "jade":
+            sched = _stability.schedule_stability(scores, components,
+                                                  seeds=tuple(schedules), **common)
+            out["schedule"] = sched
+        else:
+            sched = _stability.restart_stability(
+                scores, components, seeds=tuple(schedules),
+                base_seed=int(params.get("seed", 0)),
+                max_iter=int(params.get("max_iter", 1000)),
+                tol=float(params.get("tol", 1e-7)))
+            out["restart"] = sched
         stable &= sched["worst_abs_r"] > stable_r
+    if (bootstraps or split_mask is not None) and contrast != "jade":
+        raise NotImplementedError(
+            "the feature bootstrap and split-half checks are defined for the jade "
+            "contrast only; see PLAN.md. Pass bootstraps=0 and split_mask=None for "
+            f"contrast={contrast!r}.")
     if bootstraps:
         out["feature_bootstrap"] = _stability.feature_bootstrap_stability(
             scores, components, n_bootstraps=int(bootstraps), seed=seed, **common)

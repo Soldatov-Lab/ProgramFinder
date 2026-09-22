@@ -8,8 +8,8 @@ for copy-number-like components.
 counts (AnnData)
   -> pp.residual_null      feature-wise null: NB (UMIs) or depth-adjusted Bernoulli (ATAC)
   -> tl.pca                matrix-free, explicitly centred randomized PCA of the Pearson residual
-  -> tl.gica               feature-whitened ICA of the leading PCs; contrast "jade" (Picard planned)
-  -> tl.gica_stability     permuted Jacobi schedules, feature bootstraps, fixed-whitening split halves
+  -> tl.gica               feature-whitened ICA of the leading PCs; contrast "jade" or "picard"
+  -> tl.gica_stability     Jacobi schedules (jade) or restarts (picard), feature bootstraps, split halves
   -> get.*                 labelled DataFrames of activities, loadings, reliability
 
 genomic read-outs of the loadings (pf.tl.genomic / pf.pl.genomic)
@@ -46,7 +46,7 @@ adata = pf.io.read_h5ad_rows(
 
 pf.pp.residual_null(adata, model="bernoulli", depth_key="n_unique", depth_bins=256)
 pf.tl.pca(adata, n_comps=100, check_seed=1)        # check_seed: second sketch, agreement recorded
-pf.tl.gica(adata, n_comps=50, contrast="jade")
+pf.tl.gica(adata, n_comps=50, contrast="jade")            # or contrast="picard" (CPU, needs .[picard])
 pf.tl.gica_stability(adata, schedules=range(1, 6), bootstraps=10,
                      split_mask=pf.alternating_blocks(peak_midpoint_bp, 200_000, group=chrom))
 
@@ -84,12 +84,25 @@ Where results land:
   canonical correlation, not only the mean.
 - **The read-out is fixed by the contract** `score_to_activity @ loadings == P`
   for every orthogonal rotation; only the choice of rotation differs between
-  contrasts. JADE and (later) Picard therefore produce different component
-  numberings on the same span.
+  contrasts. **JADE and Picard numberings do not transfer**: on the ATAC rank-50
+  span of the source project, JADE c48 is Picard c30 at |r| 0.86 and JADE c20
+  splits over two Picard axes. Always crosswalk with
+  `pf._stability.matched_columns` rather than carrying a component number
+  between contrasts.
+- **Both contrasts share one whitening `K`**, so their rotations compose
+  orthogonally (`W_jade @ W_picard.T`) and are directly comparable. Picard is
+  run on the already-whitened matrix rather than on its own internal whitening
+  for exactly this reason.
 - **JADE has no random start.** Reliability is read from permuted Jacobi
   schedules on the same cumulants (stationary points the data cannot rank),
   from feature bootstraps, and from fixed-whitening split halves.
   `effective_support` catches components that are single-cell spikes.
+- **Picard does have a random start**, so its reliability check is restarts
+  (`gica_stability` dispatches on the stored contrast). Each restart's tanh
+  objective is reported beside the agreement: a restart scoring higher than the
+  stored fit means the stored basis is not the best one found. On a span with
+  many near-degenerate stationary points this matters -- no single fit is "the"
+  answer, and the modal solution need not be the best-scoring one.
 
 - **Genomic read-outs are descriptive.** The autocorrelation ratio, the
   standardised chromosome effect and the fitted segments are signed effects

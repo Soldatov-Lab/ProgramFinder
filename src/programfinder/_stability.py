@@ -1,7 +1,8 @@
 """Reliability of feature-ICA components: schedules, bootstraps, split halves.
 
 JADE has no random initialisation, so the optimiser-restart check used with
-tanh ICA is replaced by three data-side checks:
+tanh ICA (``restart_stability``, the reliability check for
+``contrast="picard"``) is replaced by three data-side checks:
 
 ``schedule_stability``
     re-diagonalise the SAME cumulant stack under permuted Jacobi pair
@@ -26,11 +27,12 @@ from __future__ import annotations
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from ._basis import diagonal_criterion, jade_rotation, whiten_loadings
+from ._basis import diagonal_criterion, jade_rotation, picard_rotation, whiten_loadings
 from ._backend import array_module
 
 __all__ = ["matched_columns", "effective_support", "schedule_stability",
-           "feature_bootstrap_stability", "alternating_blocks", "split_half_stability"]
+           "restart_stability", "feature_bootstrap_stability", "alternating_blocks",
+           "split_half_stability"]
 
 
 def matched_columns(a, b):
@@ -85,6 +87,42 @@ def schedule_stability(scores, components, *, seeds=(1, 2, 3, 4, 5), use_gpu=Tru
                         "median_matched_abs_r": float(np.median(corr))})
     return {"worst_abs_r": worst, "base_criterion": base_diag["criterion"],
             "schedules": records, "n_unstable_0.99": int((worst <= 0.99).sum())}
+
+
+def restart_stability(scores, components, *, seeds=(1, 2, 3, 4), base_seed=0,
+                      max_iter=1000, tol=1e-7, **unused):
+    """Worst matched |r| of each base component over Picard optimiser restarts.
+
+    The Picard analogue of :func:`schedule_stability`: the whitening and the
+    feasible source set are fixed, only the random start moves. A component
+    that moves is a second stationary point of the tanh likelihood, so the
+    criterion of each restart is reported beside the agreement -- a restart
+    that scores HIGHER than the base fit means the stored basis is not the
+    best one found. ``unused`` swallows the JADE-only knobs so the caller can
+    pass one common kwargs dict.
+    """
+    P = np.asarray(components, np.float64)
+    Zc = np.asarray(scores, np.float64)
+    Zc = Zc - Zc.mean(0)
+    white = whiten_loadings(P)
+    z = white["K"] @ white["x"]
+    W0, base_diag = picard_rotation(z, seed=base_seed, max_iter=max_iter, tol=tol)
+    base = _activities(Zc, white["K_inv"], W0)
+    worst = np.full(P.shape[0], np.inf)
+    records = []
+    for seed in seeds:
+        W, diag = picard_rotation(z, seed=seed, max_iter=max_iter, tol=tol)
+        alt = _activities(Zc, white["K_inv"], W)
+        i, _, corr = matched_columns(base, alt)
+        worst[i] = np.minimum(worst[i], corr)
+        records.append({"seed": int(seed), "criterion": diag["criterion"],
+                        "n_iter": diag["n_iter"], "converged": diag["converged"],
+                        "median_matched_abs_r": float(np.median(corr))})
+    return {"worst_abs_r": worst, "base_criterion": base_diag["criterion"],
+            "base_seed": int(base_seed), "restarts": records,
+            "n_unstable_0.99": int((worst <= 0.99).sum()),
+            "best_criterion_is_base": all(
+                entry["criterion"] <= base_diag["criterion"] + 1e-9 for entry in records)}
 
 
 def feature_bootstrap_stability(scores, components, *, n_bootstraps=10, seed=0,

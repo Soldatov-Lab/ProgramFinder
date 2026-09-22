@@ -19,7 +19,13 @@ differs between contrasts:
     fourth-order cumulant joint diagonalisation (Cardoso & Souloumiac), no
     random initialisation; see :mod:`programfinder._jade`.
 ``"picard"``
-    Picard-O with the tanh log-density (planned; see ``PLAN.md``).
+    Picard-O with the tanh log-density, from the optional ``python-picard``
+    dependency, run on the SAME ``K`` rather than on picard's own internal
+    whitening. The two whitenings differ by an orthogonal factor, so the
+    feasible source set ``{W K x : W in O(r)}`` is identical either way and the
+    optima coincide -- but the optimiser path does not, so a given
+    ``random_state`` need not land on the same one. Reliability for this
+    contrast is therefore restarts, not Jacobi schedules.
 
 Display convention, shared by every contrast: activities have unit standard
 deviation and positive skewness, loadings carry the corresponding scale and
@@ -29,6 +35,7 @@ sign so that ``score_to_activity @ loadings == P``.
 from __future__ import annotations
 
 import time
+import warnings
 
 import numpy as np
 from scipy.stats import kurtosis, skew
@@ -36,8 +43,8 @@ from scipy.stats import kurtosis, skew
 from . import _jade
 from ._backend import array_module, to_host
 
-__all__ = ["whiten_loadings", "feature_ica", "jade_rotation", "diagonal_criterion",
-           "display_orientation", "CONTRASTS"]
+__all__ = ["whiten_loadings", "feature_ica", "jade_rotation", "picard_rotation",
+           "diagonal_criterion", "display_orientation", "CONTRASTS"]
 
 CONTRASTS = ("jade", "picard")
 
@@ -119,21 +126,87 @@ def jade_rotation(z, *, threshold=None, max_sweeps=600, schedule_seed=None,
 
 
 # --------------------------------------------------------------------------
+# Picard-O contrast on the same whitened source matrix
+# --------------------------------------------------------------------------
+
+def logcosh_criterion(y):
+    """Tanh-density log-likelihood of the sources, up to an additive constant.
+
+    ``fun="tanh"`` is the density model ``p(y) propto 1 / cosh(y)``, so the
+    likelihood Picard-O maximises is ``-sum_i E[log cosh(y_i)]``. Returned with
+    that sign, so larger is better and it ranks restarts the way
+    :func:`diagonal_criterion` ranks JADE schedules.
+    """
+    y = np.asarray(y, np.float64)
+    return float(-np.logaddexp(y, -y).mean(1).sum() + y.shape[0] * np.log(2.0))
+
+
+def picard_rotation(z, *, seed=0, max_iter=1000, tol=1e-7, w_init=None):
+    """Orthogonal ``W`` (rows = sources) maximising the tanh log-density of ``z``.
+
+    ``z`` is the already-whitened, row-centred (r, N) matrix, so picard is
+    called with ``whiten=False, centering=False`` and its returned unmixing IS
+    the rotation. CPU only -- ``python-picard`` is numpy -- which is why this
+    contrast ignores the device setting.
+
+    ``w_init`` warm-starts the optimiser from a given rotation instead of a
+    random one, which is how a rotation fitted elsewhere is checked for being
+    a stationary point here: pass it and the returned ``W`` should come back
+    unchanged. It must be orthogonal in THIS whitening.
+    """
+    try:
+        from picard import picard
+    except ImportError as error:  # pragma: no cover - optional dependency
+        raise ImportError(
+            "contrast='picard' needs the optional python-picard dependency: "
+            "pip install -e '.[picard]'") from error
+    z = np.asarray(z, np.float64)
+    r = z.shape[0]
+    if w_init is not None:
+        w_init = np.asarray(w_init, np.float64)
+        error = float(np.abs(w_init @ w_init.T - np.eye(r)).max())
+        # Looser than the 1e-8 the fitted W is held to: a warm start often comes
+        # from a float32 artifact, and picard re-orthogonalises as it iterates.
+        if error > 1e-6:
+            raise ValueError(f"w_init is not orthogonal in this whitening ({error:.1e})")
+    started = time.time()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _, unmixing, sources, n_iter = picard(
+            z, n_components=r, ortho=True, fun="tanh", whiten=False,
+            centering=False, max_iter=max_iter, tol=tol, random_state=seed,
+            w_init=w_init, return_n_iter=True)
+    W = np.asarray(unmixing, np.float64)
+    messages = [str(entry.message) for entry in caught]
+    diagnostics = {
+        "contrast": "picard", "seed": int(seed), "n_iter": int(n_iter),
+        "warm_started": w_init is not None,
+        "converged": not any("did not converge" in m.lower() for m in messages),
+        "warnings": messages, "device": "cpu", "max_iter": int(max_iter),
+        "tol": float(tol), "criterion": logcosh_criterion(sources),
+        "seconds": round(time.time() - started, 2)}
+    return W, diagnostics
+
+
+# --------------------------------------------------------------------------
 # public entry point
 # --------------------------------------------------------------------------
 
 def feature_ica(scores, components, *, contrast="jade", use_gpu=True, max_sweeps=600,
-                threshold=None, schedule_seed=None, seed=0, max_iter=1000, tol=1e-7):
+                threshold=None, schedule_seed=None, seed=0, max_iter=1000, tol=1e-7,
+                w_init=None):
     """Feature-space ICA of a PCA span; returns activities, loadings and maps.
 
     Parameters
     ----------
     scores : (n_cells, r) PCA scores (any centring; centred internally)
     components : (r, N) PCA component rows
-    contrast : ``"jade"`` (implemented) or ``"picard"`` (planned)
+    contrast : ``"jade"`` or ``"picard"``
     use_gpu : run the cumulant and Jacobi stages on cupy when available
+        (ignored by the Picard contrast, which is CPU only)
     max_sweeps, threshold, schedule_seed : JADE controls
-    seed, max_iter, tol : reserved for the Picard contrast
+    seed, max_iter, tol, w_init : Picard controls (``w_init`` warm-starts the
+        optimiser from a rotation orthogonal in this whitening)
 
     Returns a dict with ``activities`` (n, r; unit SD, positive skew),
     ``loadings`` (r, N), ``sources`` (r, N; whitened, row-centred), ``W``,
@@ -157,9 +230,8 @@ def feature_ica(scores, components, *, contrast="jade", use_gpu=True, max_sweeps
         W, diagnostics, _ = jade_rotation(z, threshold=threshold, max_sweeps=max_sweeps,
                                           schedule_seed=schedule_seed, use_gpu=use_gpu)
     else:
-        raise NotImplementedError(
-            "the picard contrast is the next port step; see PLAN.md in the repository "
-            "root. Use contrast='jade' for now.")
+        W, diagnostics = picard_rotation(z, seed=seed, max_iter=max_iter, tol=tol,
+                                         w_init=w_init)
 
     orthogonality = float(np.abs(W @ W.T - np.eye(r)).max())
     if orthogonality > 1e-8:
