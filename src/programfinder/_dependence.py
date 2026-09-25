@@ -15,9 +15,21 @@ ICA runs over features), two pairwise statistics, a != b:
 ``E_ab = corr(s_a^2, s_b^2)``
     energy dependence, the classic within-subspace signature.
 
-Raw values are dominated by the heaviest-tailed components, so both are
-referred to a null that permutes every source's features independently
-(marginals kept, cross-dependence destroyed) and reported as z-scores.
+Both are referred to the null that permutes every source's features
+independently (marginals kept, cross-dependence destroyed). For ``E`` that null
+is EXACT: a Pearson correlation under a uniform random permutation of one of
+its vectors has mean 0 and variance ``1 / (n - 1)`` whatever the marginals, so
+``zE = E sqrt(n - 1)`` needs no draws. For ``D`` there is no closed form and the
+null is estimated from ``reps`` permutations.
+
+Do not estimate the ``E`` null by sampling. The permutation distribution of a
+correlation between two spike-like (heavy-tailed) vectors is itself
+heavy-tailed: its variance comes from rare draws that put one extreme feature
+on another, so a finite-sample SD is badly underestimated for exactly the
+components that matter. On the rank-50 tumour RNA basis, 100-draw z-scores from
+two GPUs correlated at r 0.76 (the same seed, different devices) and 1000-draw
+z-scores from two seeds at 0.97, reordering partners; the exact z is
+deterministic. ``zD`` carries the same caveat and is reported, not ranked on.
 
 Groups: any global threshold on these z-scores chains unrelated programs
 through a few hub components (technical axes such as mitochondrial reads or
@@ -57,13 +69,18 @@ def fourth_order_cumulants(s, xp=np, chunk=20000):
 
 
 def pairwise_dependence(s, xp=np, chunk=20000):
-    """Residual cross-cumulant energy ``D`` and energy correlation ``E`` (K x K)."""
+    """Residual cross-cumulant energy ``D`` and energy correlation ``E`` (K x K).
+
+    ``E`` is the Pearson correlation of the squared rows. For whitened sources
+    (rows uncorrelated, unit variance) it equals the cumulant form
+    ``cum(a, a, b, b) / sqrt((kurt_a + 2)(kurt_b + 2))``.
+    """
     q = fourth_order_cumulants(s, xp, chunk)
     D = (q ** 2).sum(axis=(2, 3))
-    idx = xp.arange(s.shape[0])
-    diag4 = q[idx, idx, idx, idx]
-    aabb = q[idx[:, None], idx[:, None], idx[None, :], idx[None, :]]
-    E = aabb / xp.sqrt(xp.outer(diag4 + 2, diag4 + 2))
+    sq = s * s
+    sq = sq - sq.mean(1, keepdims=True)
+    norm = xp.sqrt((sq * sq).sum(1))
+    E = (sq @ sq.T) / xp.outer(norm, norm)
     return D, E
 
 
@@ -76,30 +93,36 @@ def _standardise_rows(s, xp):
 def dependence_z(sources, *, reps=100, seed=0, use_gpu=True, chunk=20000):
     """D, E and their z-scores against a per-source feature-permutation null.
 
-    Returns host arrays ``D``, ``E``, ``zD``, ``zE`` (K x K, diagonal NaN) and
-    the null mean and SD of each.
+    ``zE`` uses the exact permutation moments of a correlation (mean 0,
+    variance 1 / (n - 1)) and is deterministic. ``zD`` uses ``reps`` sampled
+    permutations (``reps=0`` skips it); see the module docstring for why a
+    sampled null is unreliable on heavy-tailed sources. Returns host arrays
+    ``D``, ``E``, ``zD``, ``zE`` (K x K, diagonal NaN) and the null moments.
     """
     xp, on_gpu = array_module(use_gpu)
     s = _standardise_rows(sources, xp)
+    n = s.shape[1]
     D, E = pairwise_dependence(s, xp, chunk)
-    rng = xp.random.default_rng(seed)
-    sum_d = xp.zeros_like(D); sq_d = xp.zeros_like(D)
-    sum_e = xp.zeros_like(E); sq_e = xp.zeros_like(E)
-    for _ in range(int(reps)):
-        perm = xp.argsort(rng.random(s.shape), axis=1)
-        d, e = pairwise_dependence(xp.take_along_axis(s, perm, axis=1), xp, chunk)
-        sum_d += d; sq_d += d * d; sum_e += e; sq_e += e * e
-    mean_d, mean_e = sum_d / reps, sum_e / reps
-    sd_d = xp.sqrt(xp.maximum(sq_d / reps - mean_d ** 2, 0))      # population SD of the null
-    sd_e = xp.sqrt(xp.maximum(sq_e / reps - mean_e ** 2, 0))
-    sd_d = xp.where(sd_d > 0, sd_d, xp.nan)                     # the diagonal has no null spread
-    sd_e = xp.where(sd_e > 0, sd_e, xp.nan)
-    out = {"D": D, "E": E, "zD": (D - mean_d) / sd_d, "zE": (E - mean_e) / sd_e,
-           "null_mean_D": mean_d, "null_sd_D": sd_d, "null_mean_E": mean_e, "null_sd_E": sd_e}
+    out = {"D": D, "E": E, "zE": E * np.sqrt(n - 1)}
+    if reps:
+        rng = xp.random.default_rng(seed)
+        sum_d = xp.zeros_like(D); sq_d = xp.zeros_like(D)
+        for _ in range(int(reps)):
+            perm = xp.argsort(rng.random(s.shape), axis=1)
+            d, _ = pairwise_dependence(xp.take_along_axis(s, perm, axis=1), xp, chunk)
+            sum_d += d; sq_d += d * d
+        mean_d = sum_d / reps
+        sd_d = xp.sqrt(xp.maximum(sq_d / reps - mean_d ** 2, 0))      # population SD of the draws
+        sd_d = xp.where(sd_d > 0, sd_d, xp.nan)                     # the diagonal has no spread
+        out.update(zD=(D - mean_d) / sd_d, null_mean_D=mean_d, null_sd_D=sd_d)
+    else:
+        out["zD"] = xp.full_like(D, xp.nan)
     out = {k: to_host(v, xp) for k, v in out.items()}
     for k in ("zD", "zE"):
         np.fill_diagonal(out[k], np.nan)
-    out.update(reps=int(reps), seed=int(seed), device="gpu" if on_gpu else "cpu")
+    out.update(null_sd_E=float(1 / np.sqrt(n - 1)), reps=int(reps), seed=int(seed),
+               zE_null="exact permutation moments", zD_null=f"{int(reps)} sampled permutations",
+               device="gpu" if on_gpu else "cpu")
     return out
 
 

@@ -124,8 +124,9 @@ Inside an independent subspace the ICA axes are not identifiable (Theis 2006):
 the group's span comes back across refits, its axes do not. `tl.gica_dependence`
 reads which components belong together from ONE fit -- the residual fourth-order
 dependence of the whitened sources (cross-cumulant energy `zD`, energy
-correlation `zE`) against a feature-permutation null. On the rank-50 tumour RNA
-basis it recovers the partners of the 50-refit bootstrap (AUC 0.92-0.98).
+correlation `zE`) against a feature-permutation null; `zE` uses the exact
+permutation moments (deterministic), `zD` sampled draws. On the rank-50 tumour
+bases it recovers the partners of the 50-refit bootstrap (AUC 0.96 RNA, 0.91 ATAC).
 
 Its `groups` are a proposal. Any global threshold chains unrelated programs
 through a few technical hub components (mitochondrial reads, depth), so the

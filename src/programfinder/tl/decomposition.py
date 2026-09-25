@@ -336,8 +336,11 @@ def gica_dependence(adata, *, key="pf_gica", reps=100, seed=0, statistic="energy
     dependence the fit could not remove. For every pair: the residual
     cross-cumulant energy ``D`` and the energy correlation ``E`` of the
     whitened sources (the loadings; the ICA runs over features), each as a
-    z-score against a per-source feature-permutation null of ``reps``
-    replicates. See :mod:`programfinder._dependence`.
+    z-score against the null that permutes every source's features. ``zE``
+    uses the exact permutation moments and is deterministic; ``zD`` is sampled
+    from ``reps`` permutations (``reps=0`` skips it) and, being unstable on
+    heavy-tailed sources, should not be ranked on. See
+    :mod:`programfinder._dependence`.
 
     Stored in ``uns[key]["dependence"]``: ``zD``, ``zE``, ``D``, ``E`` (K x K),
     ``partners`` (K x K int, each row the supported components ordered by the

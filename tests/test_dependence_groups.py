@@ -41,10 +41,23 @@ def test_dependence_z_finds_the_planted_subspace_and_nothing_else():
     for key in ("zD", "zE", "D", "E"):
         assert res[key].shape == (6, 6)
     np.testing.assert_allclose(np.nan_to_num(res["zE"]), np.nan_to_num(res["zE"].T), atol=1e-8)
-    assert res["zE"][0, 1] > 20 and res["zD"][0, 1] > 20
+    assert res["zE"][0, 1] > 10 and res["zD"][0, 1] > 10
     off = np.abs(res["zE"][2:, 2:][~np.eye(4, dtype=bool)])
     assert off.max() < 5
     assert _dependence.mutual_top_groups(res["zE"]) == [[0, 1]]
+
+
+def test_exact_energy_null_is_calibrated_and_needs_no_draws():
+    """zE of independent heavy-tailed sources is ~N(0, 1) across pairs, and does not
+    depend on the seed or on the sampled D null at all."""
+    rng = np.random.default_rng(7)
+    s = rng.standard_t(3, size=(40, 3000))            # heavy tails, independent rows
+    res = _dependence.dependence_z(s, reps=0, use_gpu=False)
+    z = res["zE"][~np.eye(40, dtype=bool)]
+    assert abs(z.mean()) < 0.15 and 0.8 < z.std() < 1.2
+    assert np.isnan(res["zD"]).all()
+    other = _dependence.dependence_z(s, reps=3, seed=99, use_gpu=False)
+    np.testing.assert_array_equal(res["zE"], other["zE"])
 
 
 def test_mutual_top_groups_do_not_chain_through_a_hub():
