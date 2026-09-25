@@ -10,6 +10,8 @@ counts (AnnData)
   -> tl.pca                matrix-free, explicitly centred randomized PCA of the Pearson residual
   -> tl.gica               feature-whitened ICA of the leading PCs; contrast "jade" or "picard"
   -> tl.gica_stability     Jacobi schedules (jade) or restarts (picard), feature bootstraps, split halves
+  -> tl.gica_dependence    one-fit residual dependence between components: partners and proposed groups
+  -> tl.gica_stability(groups=...)   does a group's span come back where its axes do not
   -> get.*                 labelled DataFrames of activities, loadings, reliability
 
 genomic read-outs of the loadings (pf.tl.genomic / pf.pl.genomic)
@@ -51,6 +53,11 @@ pf.tl.gica_stability(adata, schedules=range(1, 6), bootstraps=10,
                      split_mask=pf.alternating_blocks(peak_midpoint_bp, 200_000, group=chrom))
 
 pf.get.stability_table(adata)        # per component: kurtosis, support, worst |r|, split-half |cos|
+
+# groups of components (independent subspaces): one fit proposes, refits decide
+pf.tl.gica_dependence(adata)                                   # uns["pf_gica"]["dependence"]
+pf.tl.gica_stability(adata, schedules=(), bootstraps=50, groups="partners")
+pf.get.stability_table(adata)        # + top_partner, group, group_worst_min_cancorr, verdict
 pf.get.activities(adata)             # cells x components
 pf.get.loadings(adata)               # features x components
 
@@ -111,14 +118,33 @@ Where results land:
   block, and `n_peaks` is not a count of independent observations. The
   centromere table is hg38 midpoints, so an arm boundary is an interval.
 
+## Groups of components
+
+Inside an independent subspace the ICA axes are not identifiable (Theis 2006):
+the group's span comes back across refits, its axes do not. `tl.gica_dependence`
+reads which components belong together from ONE fit -- the residual fourth-order
+dependence of the whitened sources (cross-cumulant energy `zD`, energy
+correlation `zE`) against a feature-permutation null. On the rank-50 tumour RNA
+basis it recovers the partners of the 50-refit bootstrap (AUC 0.92-0.98).
+
+Its `groups` are a proposal. Any global threshold chains unrelated programs
+through a few technical hub components (mitochondrial reads, depth), so the
+stored groups use mutual top-2 partners, and `gica_stability(groups=...)` then
+scores whether each group's span comes back: the smallest canonical correlation
+between the stored and matched refit columns, on the same scale as an axis's
+|r|. The per-component `verdict` is `axis`, `group` (report the group, not the
+axis), `unresolved` or `low support`, all at `group_gate` (0.9). With
+`groups="partners"` the partner identities come from the one fit and only the
+number of partners (one or two) from the refits.
+
 ## Layout
 
 ```
 programfinder/
   pp.py            residual_null, residual_operator, feature_coordinates
-  tl/decomposition pca, gica, gica_stability
+  tl/decomposition pca, gica, gica_stability, gica_dependence
   tl/genomic       genomic_autocorr, chromosome_effects, genome_profiles
   pl/genomic       the matching figures
   io.py, get.py
-  _residual, _pca, _basis, _jade, _stability, _cin, _genome   numeric cores
+  _residual, _pca, _basis, _jade, _stability, _dependence, _cin, _genome   numeric cores
 ```

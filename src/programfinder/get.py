@@ -51,4 +51,16 @@ def stability_table(adata, key="pf_gica"):
     if "split_half" in stab:
         table["split_half_abs_cos_min"] = np.asarray(stab["split_half"]["abs_cos_min"])
     table["stable"] = np.asarray(stab["stable"], bool)
+    if "dependence" in spec:
+        dep = spec["dependence"]
+        z = np.asarray(dep["zE"] if dep["statistic"] == "energy" else dep["zD"])
+        top = np.asarray(dep["partners"])[:, 0]
+        table["top_partner"] = [f"c{t}" if t >= 0 else "" for t in top]
+        table["top_partner_z"] = [float(z[k, t]) if t >= 0 else np.nan for k, t in enumerate(top)]
+    if "groups" in stab:
+        grp = stab["groups"]
+        table["group"] = ["" if g is None else "+".join(f"c{m}" for m in g) for g in grp["group_of"]]
+        table["group_worst_min_cancorr"] = np.asarray(grp["group_worst"], float)
+        table["group_refits_below_gate"] = np.asarray(grp["group_below_gate"], int)
+        table["verdict"] = list(grp["verdict"])
     return table

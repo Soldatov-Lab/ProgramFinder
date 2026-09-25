@@ -20,6 +20,12 @@ tanh ICA (``restart_stability``, the reliability check for
     inverse participation ratio of a component's cell activities: how many
     cells actually carry it. A component reproducible across schedules can
     still be a single-cell spike.
+``group_recovery``
+    for groups of components (e.g. from :mod:`programfinder._dependence`),
+    how well the group's joint span comes back across refits: the smallest
+    canonical correlation between the reference and the matched refit
+    columns, on the same scale as an axis's matched |r|. An axis that moves
+    inside a group whose span comes back is unidentified, not unreliable.
 """
 
 from __future__ import annotations
@@ -32,7 +38,7 @@ from ._backend import array_module
 
 __all__ = ["matched_columns", "effective_support", "schedule_stability",
            "restart_stability", "feature_bootstrap_stability", "alternating_blocks",
-           "split_half_stability"]
+           "split_half_stability", "group_recovery"]
 
 
 def matched_columns(a, b):
@@ -126,30 +132,115 @@ def restart_stability(scores, components, *, seeds=(1, 2, 3, 4), base_seed=0,
 
 
 def feature_bootstrap_stability(scores, components, *, n_bootstraps=10, seed=0,
-                                use_gpu=True, max_sweeps=600, threshold=None):
-    """Worst matched |r| of each component over feature-resampled refits."""
+                                use_gpu=True, max_sweeps=600, threshold=None,
+                                reference=None, return_activities=False, out=None):
+    """Worst matched |r| of each component over feature-resampled refits.
+
+    Refit ``b`` draws ``rng.integers(0, N, N)`` feature columns from
+    ``np.random.default_rng(seed)``, so ``n_bootstraps`` refits are the first
+    ``n_bootstraps`` of one fixed sequence and a longer run extends a shorter one.
+
+    ``reference`` (n, r) is what refits are matched against; by default the
+    base fit on all features (same columns as ``tl.gica``). Pass the stored
+    activities to match against them.
+
+    ``return_activities`` also returns ``refit_activities`` (B, n, r) float32:
+    refit ``b``'s column matched to reference column ``k`` sits at ``[b, :, k]``,
+    standardised to unit SD and signed to correlate positively with it. ``out``
+    (a path, or a writable (B, n, r) array) receives them instead of RAM; a
+    path is opened as a ``.npy`` memmap. Also returned: ``matched_abs_r``
+    (B, r) and ``matched_column`` (B, r), the refit column placed at slot ``k``.
+    """
     P = np.asarray(components, np.float64)
     Zc = np.asarray(scores, np.float64)
     Zc = Zc - Zc.mean(0)
-    white = whiten_loadings(P)
-    W0, _, _ = jade_rotation(white["K"] @ white["x"], use_gpu=use_gpu,
-                             max_sweeps=max_sweeps, threshold=threshold)
-    base = _activities(Zc, white["K_inv"], W0)
+    if reference is None:
+        white = whiten_loadings(P)
+        W0, _, _ = jade_rotation(white["K"] @ white["x"], use_gpu=use_gpu,
+                                 max_sweeps=max_sweeps, threshold=threshold)
+        reference = _activities(Zc, white["K_inv"], W0)
+    reference = np.asarray(reference, np.float64)
     r, n_features = P.shape
+    keep = return_activities or out is not None
+    store = None
+    if keep:
+        shape = (int(n_bootstraps), Zc.shape[0], r)
+        if out is None:
+            store = np.empty(shape, np.float32)
+        elif isinstance(out, (str, bytes)) or hasattr(out, "__fspath__"):
+            store = np.lib.format.open_memmap(out, mode="w+", dtype=np.float32, shape=shape)
+        else:
+            store = out
+            if tuple(store.shape) != shape:
+                raise ValueError(f"out has shape {tuple(store.shape)}, expected {shape}")
+    ref_c = reference - reference.mean(0)
     rng = np.random.default_rng(seed)
     worst = np.full(r, np.inf)
-    medians = []
-    for _ in range(n_bootstraps):
+    medians, matched_r, matched_col = [], [], []
+    for b in range(n_bootstraps):
         cols = rng.integers(0, n_features, n_features)
         w = whiten_loadings(P[:, cols])
         W, _, _ = jade_rotation(w["K"] @ w["x"], use_gpu=use_gpu, max_sweeps=max_sweeps,
                                 threshold=threshold)
         alt = _activities(Zc, w["K_inv"], W)
-        i, _, corr = matched_columns(base, alt)
+        i, j, corr = matched_columns(reference, alt)
         worst[i] = np.minimum(worst[i], corr)
         medians.append(float(np.median(corr)))
-    return {"worst_abs_r": worst, "bootstrap_median_abs_r": medians,
-            "n_bootstraps": int(n_bootstraps), "seed": int(seed)}
+        slot = np.empty(r, np.int64); slot[i] = j
+        rr = np.empty(r); rr[i] = corr
+        matched_r.append(rr); matched_col.append(slot)
+        if keep:
+            a = alt[:, slot] - alt[:, slot].mean(0)
+            a /= np.maximum(a.std(0), 1e-300)
+            a *= np.where((a * ref_c).sum(0) < 0, -1.0, 1.0)
+            store[b] = a.astype(np.float32)
+    result = {"worst_abs_r": worst, "bootstrap_median_abs_r": medians,
+              "n_bootstraps": int(n_bootstraps), "seed": int(seed),
+              "matched_abs_r": np.array(matched_r).reshape(-1, r),
+              "matched_column": np.array(matched_col, dtype=np.int64).reshape(-1, r)}
+    if keep:
+        if hasattr(store, "flush"):
+            store.flush()
+        result["refit_activities"] = store
+    return result
+
+
+def _orthonormal(x, xp):
+    q, _ = xp.linalg.qr(x - x.mean(-2, keepdims=True))
+    return q
+
+
+def group_recovery(reference, refit_activities, groups, *, gate=0.9, use_gpu=True):
+    """Recovery of each group's joint span over refits.
+
+    ``refit_activities`` (B, n, r) with columns matched to ``reference`` (n, r),
+    as returned by :func:`feature_bootstrap_stability`. For group ``g`` and
+    refit ``b`` the statistic is the smallest canonical correlation between
+    ``reference[:, g]`` and ``refit_activities[b][:, g]``: the group's worst
+    direction. It equals the axis |r| for a single component, so a group and
+    its members are read on one scale. Refits are processed one at a time on
+    the device, so a memmapped stack is never loaded whole.
+
+    Returns one record per group: ``members``, ``per_refit``, ``worst``,
+    ``median``, ``below_gate`` (refits under ``gate``).
+    """
+    xp, _ = array_module(use_gpu)
+    groups = [list(map(int, g)) for g in groups]
+    ref = xp.asarray(np.asarray(reference, np.float64))
+    q_ref = {tuple(g): _orthonormal(ref[:, g], xp) for g in groups}
+    values = {tuple(g): [] for g in groups}
+    for b in range(len(refit_activities)):
+        alt = xp.asarray(np.asarray(refit_activities[b], np.float64))
+        for g in groups:
+            qb = _orthonormal(alt[:, g], xp)
+            sv = xp.linalg.svd(q_ref[tuple(g)].T @ qb, compute_uv=False)
+            values[tuple(g)].append(float(sv.min()))
+    records = []
+    for g in groups:
+        v = np.asarray(values[tuple(g)])
+        records.append({"members": g, "per_refit": v, "worst": float(v.min()),
+                        "median": float(np.median(v)), "below_gate": int((v < gate).sum())})
+    return records
 
 
 def alternating_blocks(position, block_size, group=None):
