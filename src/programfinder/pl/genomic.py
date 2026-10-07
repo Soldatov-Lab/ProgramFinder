@@ -2,6 +2,7 @@
 
     pf.pl.genomic_autocorr(adata)            # six-lag profiles, flat ones highlighted
     pf.pl.chromosome_effects(adata)          # components x chromosomes (or arms) heatmap
+    pf.pl.copy_number_routes(adata)          # four route statistics against their gates
     pf.pl.genome_profiles(adata, pdf="genome_profiles.pdf")   # one page per 5 components
 
 Every function reads only what the matching ``tl`` function stored in
@@ -15,7 +16,7 @@ import numpy as np
 
 from .. import _genome as G
 
-__all__ = ["genomic_autocorr", "chromosome_effects", "genome_profiles"]
+__all__ = ["genomic_autocorr", "chromosome_effects", "copy_number_routes", "genome_profiles"]
 
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#a8a7a1"
 BLUE, RED, GREY, LIGHT = "#2a78d6", "#c0392b", "#7f8c8d", "#bdc3c7"
@@ -117,6 +118,55 @@ def chromosome_effects(adata, key="pf_gica", *, level="chrom", components=None, 
     cb = fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
     cb.set_label("SD of own loadings", fontsize=7)
     cb.outline.set_visible(False)
+    if save:
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+_ROUTE_TITLES = {"chrom_share": "one chromosome\n(top-feature share)",
+                 "run_z": "focal run\n(|mean z|, neighbours)",
+                 "opposite_arms_z": "opposite arms\n(weaker |arm z|)",
+                 "second_chrom_arm_z": "second chromosome\n(|arm z|)"}
+
+
+def copy_number_routes(adata, key="pf_gica", *, label="unique", max_labels=8, save=None):
+    """One strip per copy-number route: every component's statistic against its gate.
+
+    Red = fires this route, pale red = copy number by another route, grey =
+    none. ``label`` names the points: ``"unique"`` (fired by this route only),
+    ``"called"`` (fired by this route) or None; a strip with more than
+    ``max_labels`` such points stays unlabelled. The gap around each gate is
+    what decides whether the default gates carry over to a new dataset.
+    """
+    plt = _plt()
+    res = _result(adata, key, "copy_number", "tl.copy_number_routes")
+    routes = {r: np.asarray(v, bool) for r, v in res["routes"].items()}
+    call = np.asarray(res["copy_number"], bool)
+    n = call.size
+    jitter = (np.random.default_rng(0).random(n) - 0.5) * 0.5
+    fig, axes = plt.subplots(1, len(routes), figsize=(2.3 * len(routes), 3.6))
+    for ax, (route, fired) in zip(np.atleast_1d(axes), routes.items()):
+        values = np.asarray(res[route], float)
+        other = call & ~fired
+        unique = fired & ~np.any([v for r, v in routes.items() if r != route], axis=0)
+        for mask, color, z in ((~call, MUTED, 1), (other, "#e8a99f", 2), (fired, RED, 3)):
+            ax.scatter(jitter[mask], values[mask], s=14, color=color, lw=0, zorder=z)
+        ax.axhline(res["gates"][route], color=INK2, lw=0.8, ls="--", zorder=0)
+        pick = {"unique": unique, "called": fired}.get(label, np.zeros(n, bool))
+        if pick.sum() > max_labels:
+            pick = np.zeros(n, bool)
+        for k in np.flatnonzero(pick):
+            ax.annotate(f"c{k:02d}", (jitter[k], values[k]), xytext=(4, 0), textcoords="offset points",
+                        fontsize=6, va="center", color=INK)
+        ax.set_xlim(-0.6, 0.9)
+        ax.set_xticks([])
+        ax.set_title(f"{_ROUTE_TITLES.get(route, route)}\n{int(fired.sum())} fire, "
+                     f"{int(unique.sum())} only here", fontsize=8, loc="left")
+        for sp in ("top", "right", "bottom"):
+            ax.spines[sp].set_visible(False)
+    fig.suptitle(f"copy-number routes: {int(call.sum())} of {n} components fire at least one "
+                 f"(dashed = gate)", x=0.01, ha="left", fontsize=9)
+    fig.tight_layout()
     if save:
         fig.savefig(save, dpi=150, bbox_inches="tight")
     return fig

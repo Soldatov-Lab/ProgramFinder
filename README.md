@@ -18,6 +18,7 @@ genomic read-outs of the loadings (pf.tl.genomic / pf.pl.genomic)
   -> pp.feature_coordinates   var["pf_chrom"], var["pf_mid"] from peak names or var columns
   -> tl.genomic_autocorr      six-lag genomic autocorrelation and the flatness screen
   -> tl.chromosome_effects    standardised mean loading effect per chromosome or arm
+  -> tl.copy_number_routes    four gated dosage patterns (chromosome, focal run, arms) and the call
   -> tl.genome_profiles       winsorised block-mean binning + TV / group-TV fits, held-out lambda
   -> pl.*                     the matching figures (multi-page genome profile PDF included)
 ```
@@ -65,9 +66,12 @@ pf.get.loadings(adata)               # features x components
 pf.pp.feature_coordinates(adata)
 pf.tl.genomic_autocorr(adata)                       # uns["pf_gica"]["genomic_autocorr"]
 pf.tl.chromosome_effects(adata, level="arm")        # uns["pf_gica"]["arm_effects"]
+pf.tl.copy_number_routes(adata)                     # uns["pf_gica"]["copy_number"]
+pf.get.copy_number_table(adata)      # per component: four statistics, where they peak, routes, call
 pf.tl.genome_profiles(adata)                        # uns["pf_gica"]["genome_profiles"]
 pf.pl.genomic_autocorr(adata, save="autocorr.png")
 pf.pl.chromosome_effects(adata, level="arm", save="arm_effects.png")
+pf.pl.copy_number_routes(adata, save="cn_routes.png")     # each statistic against its gate
 pf.pl.genome_profiles(adata, pdf="genome_profiles.pdf", highlight=candidates)
 ```
 
@@ -117,6 +121,19 @@ Where results land:
   or DNA evidence: the batch-means SE misses correlation longer than the
   block, and `n_peaks` is not a count of independent observations. The
   centromere table is hg38 midpoints, so an arm boundary is an interval.
+
+- **Copy-number routes are gates, not tests.** A component is copy-number-like
+  if any of four loading patterns passes its gate: one chromosome holding
+  >= 0.75 of a pole's top 200 features; >= 4.2 |mean z| over 100 neighbouring
+  features (a focal amplicon); two opposite-sign arms of one chromosome, the
+  weaker >= 0.7 (p loss with q gain); an arm on a second chromosome >= 0.95
+  (one clone, several chromosomes). The second arm must lie on another
+  chromosome than the strongest arm, so a whole-chromosome event does not
+  count twice. The gates sit in observed gaps between dosage and regulatory
+  components of one tumour ATAC basis (rank 75, ~220k peaks); the run window
+  counts features, so its bp span follows peak density. Re-place the gates
+  for a new dataset from `pl.copy_number_routes`. chrY is excluded by default
+  (donor sex).
 
 ## Groups of components
 

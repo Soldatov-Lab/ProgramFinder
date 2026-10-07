@@ -3,6 +3,7 @@
     pf.pp.feature_coordinates(adata)                 # var["pf_chrom"], var["pf_mid"] from var_names
     pf.tl.genomic_autocorr(adata)                    # six-lag autocorrelation + flatness screen
     pf.tl.chromosome_effects(adata, level="arm")     # standardised mean loading effect per region
+    pf.tl.copy_number_routes(adata)                  # four dosage patterns, gated, and the call
     pf.tl.genome_profiles(adata)                     # binned profiles with TV / group-TV fits
 
 Everything lands in ``adata.uns[key]`` next to the gICA fit; the plotting
@@ -16,7 +17,7 @@ import numpy as np
 from .. import _cin
 from .._backend import resolve_device
 
-__all__ = ["genomic_autocorr", "chromosome_effects", "genome_profiles"]
+__all__ = ["genomic_autocorr", "chromosome_effects", "copy_number_routes", "genome_profiles"]
 
 
 def _coordinates(adata):
@@ -62,6 +63,36 @@ def chromosome_effects(adata, key="pf_gica", *, level="chrom", min_peaks=50, cop
     name = "chromosome_effects" if level == "chrom" else "arm_effects"
     adata.uns[key][name] = _cin.chromosome_effects(_loadings(adata, key), chrom, mid,
                                                    level=level, min_peaks=min_peaks)
+    return adata if copy else None
+
+
+def copy_number_routes(adata, key="pf_gica", *, n_top=200, run_peaks=100, exclude=("chrY",),
+                       min_arm_peaks=50, gates=None, copy=False):
+    """Four loading patterns of dosage per component, each gated; copy number if any fires.
+
+    * ``chrom_share``: largest one-chromosome share among the ``n_top`` most
+      extreme features of either pole -- an arm or whole chromosome;
+    * ``run_z``: largest |mean z| over ``run_peaks`` neighbouring features of
+      one chromosome -- a focal amplicon too small to fill the top list;
+    * ``opposite_arms_z``: the weaker of two opposite-sign arms of one
+      chromosome -- p loss with q gain, which splits between the poles;
+    * ``second_chrom_arm_z``: the strongest arm on a chromosome other than the
+      top arm's -- one clone with changes on several chromosomes, which spreads
+      the top list and keeps each per-feature loading low.
+
+    ``exclude`` chromosomes (default chrY, donor sex) are left out of every
+    route. ``gates`` overrides entries of ``_cin.COPY_NUMBER_GATES``, which were
+    placed in observed gaps on one tumour ATAC basis: inspect
+    ``pl.copy_number_routes`` before trusting them elsewhere. Stores
+    ``adata.uns[key]["copy_number"]``; ``get.copy_number_table`` tabulates it.
+    Descriptive read-outs, not tests, and no evidence of DNA copy number on
+    their own.
+    """
+    adata = adata.copy() if copy else adata
+    chrom, mid = _coordinates(adata)
+    adata.uns[key]["copy_number"] = _cin.copy_number_routes(
+        _loadings(adata, key), chrom, mid, n_top=n_top, run_peaks=run_peaks, exclude=exclude,
+        min_arm_peaks=min_arm_peaks, gates=gates)
     return adata if copy else None
 
 

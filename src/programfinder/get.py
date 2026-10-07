@@ -6,7 +6,7 @@ import numpy as np
 
 from .pp import residual_operator as operator  # noqa: F401  (re-exported)
 
-__all__ = ["activities", "loadings", "operator", "pcs", "stability_table"]
+__all__ = ["activities", "copy_number_table", "loadings", "operator", "pcs", "stability_table"]
 
 
 def _frame(values, index, prefix):
@@ -63,4 +63,25 @@ def stability_table(adata, key="pf_gica"):
         table["group_worst_min_cancorr"] = np.asarray(grp["group_worst"], float)
         table["group_refits_below_gate"] = np.asarray(grp["group_below_gate"], int)
         table["verdict"] = list(grp["verdict"])
+    if "copy_number" in spec:
+        table = table.join(copy_number_table(adata, key))
+    return table
+
+
+def copy_number_table(adata, key="pf_gica"):
+    """One row per component: the four copy-number statistics, where each peaks, routes and call."""
+    import pandas as pd
+
+    spec = adata.uns[key]
+    if "copy_number" not in spec:
+        raise KeyError(f"no copy-number routes under {key!r}; run tl.copy_number_routes first")
+    cn = spec["copy_number"]
+    columns = ["chrom_share", "chrom_share_chrom", "chrom_share_pole", "run_z", "run_chrom",
+               "run_start", "run_end", "run_sign", "opposite_arms_z", "opposite_arms_chrom",
+               "top_arm", "top_arm_z", "second_chrom_arm", "second_chrom_arm_z"]
+    table = pd.DataFrame({c: np.asarray(cn[c]) for c in columns})
+    table.index = [f"c{k}" for k in range(len(table))]
+    routes = cn["routes"]
+    table["cn_routes"] = ["+".join(r for r in routes if routes[r][k]) for k in range(len(table))]
+    table["copy_number"] = np.asarray(cn["copy_number"], bool)
     return table

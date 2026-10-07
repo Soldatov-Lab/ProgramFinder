@@ -95,6 +95,108 @@ def test_chromosome_effects_recover_the_planted_regions():
         _cin.chromosome_effects(L, chrom, mid, level="band")
 
 
+# ------------------------------------------------------------ copy-number routes
+
+def hg38_genome(chroms=("chr1", "chr2", "chr3", "chr4", "chr5", "chrY"), spacing_bp=50_000, seed=1):
+    """Peaks every ~spacing_bp along the real hg38 lengths, so arms follow the centromere table."""
+    rng = np.random.default_rng(seed)
+    chrom, mid = [], []
+    for c in chroms:
+        pos = np.arange(spacing_bp, _genome.HG38_LENGTH_MB[c] * 1_000_000, spacing_bp)
+        chrom.append(np.full(pos.size, c))
+        mid.append(pos + rng.integers(-spacing_bp // 4, spacing_bp // 4, pos.size))
+    return np.concatenate(chrom), np.concatenate(mid).astype(np.int64)
+
+
+def cn_tracks(chrom, mid, seed=2):
+    """One track per route, a null, a spike decoy and a chrY-only shift."""
+    rng = np.random.default_rng(seed)
+    L = rng.normal(size=(7, chrom.size))
+    cen = {c: v * 1e6 for c, v in _genome.HG38_CENTROMERE_MB.items()}
+    L[0, chrom == "chr2"] += 1.5                                         # whole chromosome
+    focal = np.flatnonzero((chrom == "chr3") & (mid > 140e6))[:30]
+    L[1, focal] += 6.0                                                   # 1.5 Mb amplicon
+    L[2, (chrom == "chr1") & (mid < cen["chr1"])] -= 1.0                 # 1p loss ...
+    L[2, (chrom == "chr1") & (mid > cen["chr1"])] += 1.0                 # ... 1q gain
+    L[3, (chrom == "chr4") & (mid > cen["chr4"])] += 1.5                 # 4q and 5p, one clone
+    L[3, (chrom == "chr5") & (mid < cen["chr5"])] += 1.5
+    L[5, rng.choice(chrom.size, 40, replace=False)] += 25.0              # decoy: a few huge peaks
+    L[6, chrom == "chrY"] += 3.0                                         # donor sex
+    return L
+
+
+def test_each_copy_number_route_fires_on_its_own_pattern():
+    chrom, mid = hg38_genome()
+    cn = _cin.copy_number_routes(cn_tracks(chrom, mid), chrom, mid, run_peaks=20)
+    routes = cn["routes"]
+    assert routes["chrom_share"][0] and cn["chrom_share_chrom"][0] == "chr2"
+    assert cn["chrom_share_pole"][0] == 1
+    assert routes["run_z"][1] and not routes["chrom_share"][1]
+    assert cn["run_chrom"][1] == "chr3" and cn["run_start"][1] > 140e6 and cn["run_sign"][1] == 1
+    assert routes["opposite_arms_z"][2] and cn["opposite_arms_chrom"][2] == "chr1"
+    assert routes["second_chrom_arm_z"][3]
+    assert {cn["top_arm"][3], cn["second_chrom_arm"][3]} == {"chr4q", "chr5p"}
+    assert not routes["chrom_share"][3]
+    assert list(cn["copy_number"]) == [True, True, True, True, False, False, False]
+
+
+def test_whole_chromosome_does_not_count_as_two_arms():
+    chrom, mid = hg38_genome()
+    cn = _cin.copy_number_routes(cn_tracks(chrom, mid), chrom, mid, run_peaks=20)
+    assert cn["top_arm"][0].startswith("chr2")
+    assert not cn["second_chrom_arm"][0].startswith("chr2")
+    assert cn["second_chrom_arm_z"][0] < 0.5 * abs(cn["top_arm_z"][0])
+    assert not cn["routes"]["second_chrom_arm_z"][0]
+
+
+def test_excluded_chromosome_is_out_of_every_route_and_gates_validate():
+    chrom, mid = hg38_genome()
+    L = cn_tracks(chrom, mid)
+    assert not _cin.copy_number_routes(L, chrom, mid, run_peaks=20)["copy_number"][6]
+    kept = _cin.copy_number_routes(L, chrom, mid, run_peaks=20, exclude=())
+    assert kept["routes"]["chrom_share"][6] and kept["chrom_share_chrom"][6] == "chrY"
+    strict = _cin.copy_number_routes(L, chrom, mid, run_peaks=20, gates={"run_z": 1e6})
+    assert not strict["routes"]["run_z"].any() and strict["gates"]["chrom_share"] == 0.75
+    with pytest.raises(ValueError, match="unknown gates"):
+        _cin.copy_number_routes(L, chrom, mid, gates={"run": 3.0})
+
+
+def test_routes_ignore_sign_and_scale_of_the_loadings():
+    chrom, mid = hg38_genome()
+    L = cn_tracks(chrom, mid)
+    a = _cin.copy_number_routes(L, chrom, mid, run_peaks=20)
+    b = _cin.copy_number_routes(-3.0 * L + 7.0, chrom, mid, run_peaks=20)
+    for name in ("chrom_share", "run_z", "opposite_arms_z", "second_chrom_arm_z"):
+        np.testing.assert_allclose(a[name], b[name], rtol=1e-9, atol=1e-12)
+    one_pole = [0, 1, 3]                     # the other tracks tie between poles
+    assert list(b["chrom_share_pole"][one_pole]) == list(-a["chrom_share_pole"][one_pole])
+
+
+def test_copy_number_routes_on_anndata(tmp_path):
+    chrom, mid = hg38_genome()
+    L = cn_tracks(chrom, mid)
+    adata = ad.AnnData(X=np.zeros((50, chrom.size), np.float32))
+    adata.var_names = [f"{c}:{m - 250}-{m + 250}" for c, m in zip(chrom, mid)]
+    adata.obsm["X_pf_gica"] = np.random.default_rng(3).normal(size=(50, L.shape[0])).astype(np.float32)
+    adata.varm["pf_gica_loadings"] = L.T.astype(np.float32)
+    adata.uns["pf_gica"] = {"contrast": "jade"}
+    with pytest.raises(KeyError, match="copy_number_routes"):
+        pf.get.copy_number_table(adata)
+    pf.pp.feature_coordinates(adata)
+    pf.tl.copy_number_routes(adata, run_peaks=20)
+    table = pf.get.copy_number_table(adata)
+    assert list(table.index[table["copy_number"]]) == ["c0", "c1", "c2", "c3"]
+    assert table.loc["c1", "cn_routes"] == "run_z"
+    assert table.loc["c4", "cn_routes"] == ""
+    pytest.importorskip("matplotlib")
+    import matplotlib
+    matplotlib.use("Agg")
+    pf.pl.copy_number_routes(adata, save=tmp_path / "routes.png")
+    assert (tmp_path / "routes.png").exists()
+    import matplotlib.pyplot as plt
+    plt.close("all")
+
+
 # ------------------------------------------------------------------- solver
 
 @pytest.mark.parametrize("q", [1, 2])

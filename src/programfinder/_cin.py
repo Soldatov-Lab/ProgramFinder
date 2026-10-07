@@ -14,6 +14,13 @@ Three tools, all functions of the loadings alone:
     component's own loading spread. It is NOT a z-test -- peaks on one
     chromosome are strongly correlated, so ``n_peaks`` is not a number of
     independent observations.
+``copy_number_routes``
+    four loading patterns of dosage, each a statistic with a gate: one
+    chromosome dominating a pole's top features, a focal run of neighbouring
+    features, opposite-sign arms of one chromosome, and arms of two different
+    chromosomes moving together. A component is copy-number-like if any route
+    fires. The default gates were set in observed gaps on one ATAC dataset
+    and are not portable without a look at the strip plot.
 ``genome_profiles``
     winsorised, block-mean genomic binning of the loadings with a batch-means
     standard error, and two piecewise-constant fits by one ADMM solver on the
@@ -38,7 +45,9 @@ from scipy.linalg import cho_solve_banded, cholesky_banded
 from . import _genome as G
 from ._backend import array_module, to_host
 
-__all__ = ["LAG_BINS", "genomic_autocorr", "chromosome_effects", "Binned", "winsorise",
+__all__ = ["LAG_BINS", "genomic_autocorr", "chromosome_effects", "COPY_NUMBER_GATES",
+           "top_feature_chrom_share", "contiguous_run", "arm_routes", "copy_number_routes",
+           "Binned", "winsorise",
            "bin_loadings", "chain_edges", "solve_chain_tv", "lambda_max",
            "segments_for_component", "one_se_rule", "activity_whitening", "block_split",
            "select_fraction", "genome_profiles", "LAM_FRACTIONS"]
@@ -65,6 +74,13 @@ JUMP_TOL = 0.02
 #: regularisation path, as fractions of the exact lambda_max
 LAM_FRACTIONS = tuple(np.geomspace(1.0, 1.0 / 400.0, 14))
 SPLIT_SEED = 20260912
+
+#: copy-number route gates, set in the observed gaps between dosage and
+#: regulatory components of a rank-75 tumour ATAC basis (~220k peaks, 2026-09-28):
+#: top-200 chromosome share, |mean z| over 100 neighbouring peaks, the weaker of two
+#: opposite-sign arms, the strongest arm on a second chromosome
+COPY_NUMBER_GATES = {"chrom_share": 0.75, "run_z": 4.2, "opposite_arms_z": 0.7,
+                     "second_chrom_arm_z": 0.95}
 
 
 # ============================================================ autocorrelation
@@ -141,6 +157,146 @@ def chromosome_effects(loadings, chrom, mid, *, level="chrom", min_peaks=50,
             "dominant": dominant, "dominant_effect": effect[np.arange(L.shape[0]),
                                                             np.abs(effect).argmax(1)],
             "min_peaks": int(min_peaks)}
+
+
+# ======================================================= copy-number routes
+
+def _standardise(loadings):
+    L = np.asarray(loadings, np.float64)
+    Z = L - L.mean(1, keepdims=True)
+    return Z / np.maximum(Z.std(1, keepdims=True), 1e-300)
+
+
+def top_feature_chrom_share(loadings, chrom, *, n_top=200, exclude=("chrY",)):
+    """Largest one-chromosome share among the ``n_top`` most extreme features of either pole.
+
+    Features on ``exclude`` chromosomes are dropped before the top features are
+    picked (chrY follows donor sex, not a clone). Returns ``share``, the
+    ``chrom`` holding it and the ``pole`` (+1 / -1) where it is reached.
+    """
+    L = np.asarray(loadings, np.float64)
+    chrom = np.asarray(chrom).astype(str)
+    keep = np.flatnonzero(~np.isin(chrom, list(exclude)))
+    n_top = min(int(n_top), keep.size)
+    K = L.shape[0]
+    share, where, pole = np.zeros(K), np.full(K, "", dtype=object), np.zeros(K, int)
+    for k in range(K):
+        for sign in (1, -1):
+            top = keep[np.argpartition(-sign * L[k, keep], n_top - 1)[:n_top]]
+            names, counts = np.unique(chrom[top], return_counts=True)
+            j = counts.argmax()
+            if counts[j] / n_top > share[k]:
+                share[k], where[k], pole[k] = counts[j] / n_top, names[j], sign
+    return {"share": share, "chrom": where.astype(str), "pole": pole, "n_top": n_top}
+
+
+def contiguous_run(loadings, chrom, mid, *, window=100, exclude=("chrY",)):
+    """Largest |mean standardised loading| over ``window`` neighbouring features of one chromosome.
+
+    A focal amplicon covers too few features to fill a pole's top list but
+    moves a run of neighbours together. The window counts FEATURES, so its span
+    in bp follows feature density; the span of the best run is reported
+    (``start``/``end`` = midpoints of its first and last feature) with its
+    ``sign``. Loadings are z-scored over all features first.
+    """
+    Z = _standardise(loadings)
+    chrom = np.asarray(chrom).astype(str)
+    mid = np.asarray(mid, np.int64)
+    K = Z.shape[0]
+    best = np.zeros(K)
+    where = np.full(K, "", dtype=object)
+    start, end, sign = np.zeros(K, np.int64), np.zeros(K, np.int64), np.zeros(K, int)
+    for c in G.genomic_order(chrom):
+        if c in exclude:
+            continue
+        idx = np.flatnonzero(chrom == c)
+        if idx.size < window:
+            continue
+        idx = idx[np.argsort(mid[idx], kind="stable")]
+        cs = np.cumsum(np.c_[np.zeros(K), Z[:, idx]], 1)
+        means = (cs[:, window:] - cs[:, :-window]) / window       # K x (n - window + 1)
+        j = np.abs(means).argmax(1)
+        v = means[np.arange(K), j]
+        better = np.abs(v) > best
+        best = np.where(better, np.abs(v), best)
+        where[better] = c
+        start[better] = mid[idx[j[better]]]
+        end[better] = mid[idx[j[better] + window - 1]]
+        sign[better] = np.sign(v[better]).astype(int)
+    return {"run_z": best, "chrom": where.astype(str), "start": start, "end": end,
+            "sign": sign, "window": int(window)}
+
+
+def arm_routes(effect, regions, *, exclude=("chrY",)):
+    """The two arm-level routes from a components x arms effect matrix.
+
+    ``opposite_arms_z``: over chromosomes with both arms, the weaker |effect|
+    of the p and q arms when their signs differ (0 otherwise) -- a gain of one
+    arm and a loss of the other. ``second_chrom_arm_z``: the largest |effect|
+    on any arm of a chromosome OTHER than the one carrying the strongest arm --
+    one clone carrying changes on two chromosomes. Taking the second arm from
+    another chromosome keeps a whole-chromosome event (both arms of one
+    chromosome) from counting twice.
+    """
+    E = np.asarray(effect, np.float64)
+    regions = np.asarray(regions).astype(str)
+    keep = np.flatnonzero(~np.isin(np.char.rstrip(regions, "pq"), list(exclude)))
+    E, regions = E[:, keep], regions[keep]
+    K = E.shape[0]
+    region_chrom = np.array([r[:-1] for r in regions])
+    opp, opp_chrom = np.zeros(K), np.full(K, "", dtype=object)
+    for c in np.unique(region_chrom):
+        cols = np.flatnonzero(region_chrom == c)
+        if cols.size != 2:
+            continue
+        p, q = E[:, cols[0]], E[:, cols[1]]
+        v = np.where(np.sign(p) * np.sign(q) < 0, np.minimum(np.abs(p), np.abs(q)), 0.0)
+        opp_chrom[v > opp] = c
+        opp = np.maximum(opp, v)
+    A = np.abs(E)
+    top = A.argmax(1)
+    other = np.where(region_chrom[None, :] == region_chrom[top][:, None], 0.0, A)
+    second = other.argmax(1)
+    rows = np.arange(K)
+    return {"opposite_arms_z": opp, "opposite_arms_chrom": opp_chrom.astype(str),
+            "top_arm": regions[top], "top_arm_z": E[rows, top],
+            "second_chrom_arm": regions[second], "second_chrom_arm_z": other[rows, second]}
+
+
+def copy_number_routes(loadings, chrom, mid, *, n_top=200, run_peaks=100, exclude=("chrY",),
+                       min_arm_peaks=50, gates=None):
+    """The four copy-number routes of each component, their gates and the combined call.
+
+    Every statistic is in units of the component's own loading spread and is
+    a read-out, not a test: the gates are thresholds placed in observed gaps
+    (``COPY_NUMBER_GATES``), to be re-placed per dataset from the strip plot
+    (``pl.copy_number_routes``). Arm effects are the standardised (centred) mean
+    loading per arm, ``chromosome_effects(level="arm")`` on z-scored loadings.
+    """
+    gates = {**COPY_NUMBER_GATES, **(gates or {})}
+    unknown = set(gates) - set(COPY_NUMBER_GATES)
+    if unknown:
+        raise ValueError(f"unknown gates {sorted(unknown)}; expected {sorted(COPY_NUMBER_GATES)}")
+    chrom = np.asarray(chrom).astype(str)
+    mid = np.asarray(mid, np.int64)
+    share = top_feature_chrom_share(loadings, chrom, n_top=n_top, exclude=exclude)
+    run = contiguous_run(loadings, chrom, mid, window=run_peaks, exclude=exclude)
+    arms = chromosome_effects(_standardise(loadings), chrom, mid, level="arm",
+                              min_peaks=min_arm_peaks)
+    arm = arm_routes(arms["effect"], arms["regions"], exclude=exclude)
+    routes = {"chrom_share": share["share"] >= gates["chrom_share"],
+              "run_z": run["run_z"] >= gates["run_z"],
+              "opposite_arms_z": arm["opposite_arms_z"] >= gates["opposite_arms_z"],
+              "second_chrom_arm_z": arm["second_chrom_arm_z"] >= gates["second_chrom_arm_z"]}
+    return {"chrom_share": share["share"], "chrom_share_chrom": share["chrom"],
+            "chrom_share_pole": share["pole"],
+            "run_z": run["run_z"], "run_chrom": run["chrom"], "run_start": run["start"],
+            "run_end": run["end"], "run_sign": run["sign"],
+            **arm,
+            "routes": routes, "copy_number": np.any(np.vstack(list(routes.values())), 0),
+            "gates": {k: float(v) for k, v in gates.items()},
+            "params": {"n_top": share["n_top"], "run_peaks": int(run_peaks),
+                       "exclude": list(exclude), "min_arm_peaks": int(min_arm_peaks)}}
 
 
 # ================================================================== binning
